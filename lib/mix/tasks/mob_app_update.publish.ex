@@ -18,8 +18,14 @@ defmodule Mix.Tasks.MobAppUpdate.Publish do
        installed app is signed with, or Android refuses the update),
     3. computes the APK's sha256 and writes `update.json` and `<apk>.sha256`
        to `--out` (default: a directory under the system temp dir),
-    4. runs `gh release create <tag> <apk> update.json <apk>.sha256 --repo
-       <repo> ...`, which needs an authenticated `gh` (`gh auth login`).
+    4. runs `gh release create --repo=<repo> ... -- <tag> <apk> update.json
+       <apk>.sha256`, which needs an authenticated `gh` (`gh auth login`).
+       Every option is passed as `--name=value` and the positional arguments
+       follow `--`, so no value is read as a `gh` flag.
+
+  `--tag` must be a plain git tag name: `/`-separated components of
+  `[A-Za-z0-9_][A-Za-z0-9._+-]*`, none ending in `.` or `.lock`, and no
+  `..`. Paths given to `gh` can't contain `#` (`gh` reads `file#label`).
 
   `--dry-run` does steps 1–3 and prints the `gh` command instead of running
   it. The task never touches signing keys: sign the APK first (your release
@@ -66,7 +72,15 @@ defmodule Mix.Tasks.MobAppUpdate.Publish do
     unless repo =~ ~r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z},
       do: Mix.raise("--repo must be owner/name, got: #{repo}")
 
+    unless tag?(tag),
+      do:
+        Mix.raise(
+          "--tag must be a plain git tag (/-separated [A-Za-z0-9_][A-Za-z0-9._+-]*, " <>
+            "no '..', no component ending in '.' or '.lock'), got: #{inspect(tag)}"
+        )
+
     unless File.regular?(apk), do: Mix.raise("--apk: no such file: #{apk}")
+    no_label!(apk, "--apk")
 
     if notes = opts[:notes_file] do
       unless File.regular?(notes), do: Mix.raise("--notes-file: no such file: #{notes}")
@@ -83,6 +97,10 @@ defmodule Mix.Tasks.MobAppUpdate.Publish do
         )
 
     badging = badging(apk)
+
+    unless badging.package =~ ~r/\A[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+\z/,
+      do: Mix.raise("aapt2 reported an invalid package name: #{inspect(badging.package)}")
+
     signers = signers(apk)
     sha256 = sha256(apk)
     size = File.stat!(apk).size
@@ -96,7 +114,14 @@ defmodule Mix.Tasks.MobAppUpdate.Publish do
       "size" => size
     }
 
-    out = opts[:out] || Path.join(System.tmp_dir!(), "mob_app_update-#{badging.package}-#{tag}")
+    out =
+      opts[:out] ||
+        Path.join(
+          System.tmp_dir!(),
+          "mob_app_update-#{badging.package}-#{String.replace(tag, "/", "_")}"
+        )
+
+    no_label!(out, "--out")
     File.mkdir_p!(out)
     metadata_path = Path.join(out, "update.json")
     sha_path = Path.join(out, asset <> ".sha256")
@@ -137,19 +162,38 @@ defmodule Mix.Tasks.MobAppUpdate.Publish do
     opts[key] || Mix.raise("--#{String.replace(to_string(key), "_", "-")} is required")
   end
 
+  # A git tag name that is also safe as one path component once its slashes
+  # are replaced (no "..", no leading "-" or ".").
+  defp tag?(tag) do
+    components = String.split(tag, "/")
+
+    not String.contains?(tag, "..") and
+      Enum.all?(components, fn component ->
+        component =~ ~r/\A[A-Za-z0-9_][A-Za-z0-9._+-]*\z/ and
+          not String.ends_with?(component, [".", ".lock"])
+      end)
+  end
+
+  # gh release create reads "file#label" as an asset with a display label.
+  defp no_label!(path, option) do
+    if String.contains?(path, "#"), do: Mix.raise("#{option} can't contain '#': #{path}")
+  end
+
+  # `--name=value` so a value can't be read as a flag; positional arguments
+  # (the tag and the files) after `--`.
   defp gh_args(tag, repo, files, opts) do
     notes =
       case opts[:notes_file] do
-        nil -> ["--notes", ""]
-        file -> ["--notes-file", file]
+        nil -> ["--notes="]
+        file -> ["--notes-file=#{file}"]
       end
 
-    ["release", "create", tag | files] ++
-      ["--repo", repo, "--title", opts[:title] || tag] ++
+    ["release", "create", "--repo=#{repo}", "--title=#{opts[:title] || tag}"] ++
       notes ++
-      if(opts[:target], do: ["--target", opts[:target]], else: []) ++
+      if(opts[:target], do: ["--target=#{opts[:target]}"], else: []) ++
       if(opts[:prerelease], do: ["--prerelease"], else: []) ++
-      if(opts[:draft], do: ["--draft"], else: [])
+      if(opts[:draft], do: ["--draft"], else: []) ++
+      ["--", tag | files]
   end
 
   defp quote_arg(""), do: ~s("")

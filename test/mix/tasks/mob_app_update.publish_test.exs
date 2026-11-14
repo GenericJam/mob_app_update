@@ -74,8 +74,54 @@ defmodule Mix.Tasks.MobAppUpdate.PublishTest do
     lines = infos()
     assert "Signer certificate SHA-256: #{@cert}" in lines
 
-    assert ("Dry run; would run: gh release create v1.4.0 #{apk} #{out}/update.json " <>
-              "#{out}/app-release.apk.sha256 --repo o/app --title v1.4.0 --notes \"\" --target 0abc123 --prerelease") in lines
+    assert ("Dry run; would run: gh release create --repo=o/app --title=v1.4.0 --notes= " <>
+              "--target=0abc123 --prerelease -- v1.4.0 #{apk} #{out}/update.json " <>
+              "#{out}/app-release.apk.sha256") in lines
+  end
+
+  test "tags that could escape the out dir or read as a gh flag are refused", %{
+    apk: apk,
+    tmp_dir: dir
+  } do
+    for tag <- [
+          "../../x",
+          "v1/../../x",
+          "-R",
+          "--repo=evil/x",
+          "v1.lock",
+          "v1.",
+          ".v1",
+          "a//b",
+          "v 1"
+        ] do
+      assert_raise Mix.Error, ~r/--tag must be a plain git tag/, fn ->
+        Publish.run(["--repo", "o/app", "--apk", apk, "--tag=#{tag}", "--dry-run"])
+      end
+    end
+
+    refute File.exists?(Path.join(dir, "x"))
+  end
+
+  test "a tag with slashes gets a flat default out dir", %{apk: apk} do
+    Publish.run(~w(--repo o/app --apk #{apk} --tag release/v1.4.0 --dry-run))
+
+    out = Path.join(System.tmp_dir!(), "mob_app_update-com.example.app-release_v1.4.0")
+    on_exit(fn -> File.rm_rf!(out) end)
+    assert File.regular?(Path.join(out, "update.json"))
+
+    assert Enum.any?(
+             infos(),
+             &String.ends_with?(
+               &1,
+               "-- release/v1.4.0 #{apk} #{out}/update.json #{out}/app-release.apk.sha256"
+             )
+           )
+  end
+
+  test "paths gh would split at '#' are refused", %{apk: apk, tmp_dir: dir} do
+    assert_raise Mix.Error, ~r/--out can't contain '#'/, fn ->
+      Publish.run(~w(--repo o/app --apk #{apk} --tag v1 --dry-run --out #{dir}/a#b))
+    end
   end
 
   test "a failing apksigner stops before anything is written", %{apk: apk, out: out, tmp_dir: dir} do
