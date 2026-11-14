@@ -1,0 +1,58 @@
+name: tests
+
+# CI for the plugin's host-side Elixir surface — the same gate mob core runs,
+# so a PR gets a green check instead of relying only on each contributor's
+# local pre-push hook. Native code (zig/Kotlin) is compiled by the host app at
+# deploy time, not here; it is verified on a device (see AGENTS.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: '1.19'
+            otp: '28'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - name: Cache deps + _build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-
+
+      - run: mix deps.get
+      - run: mix deps.compile
+      - run: mix compile --warnings-as-errors
+
+      - name: Format check
+        run: mix format --check-formatted
+
+      - name: Credo (strict)
+        run: mix credo --strict
+
+      - name: Tests
+        run: mix test
