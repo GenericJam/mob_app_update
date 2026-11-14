@@ -1,8 +1,9 @@
 defmodule MobAppUpdate.HTTP do
   @moduledoc false
-  # HTTP(S) over OTP's :httpc + :ssl (both in a Mob release; no Req). Redirects
+  # HTTPS over OTP's :httpc + :ssl (both in a Mob release; no Req). Redirects
   # are followed here, not by httpc, so each hop gets TLS options for its own
-  # host (GitHub's asset links 302 to another host). Android has no CA store
+  # host (GitHub's asset links 302 to another host) and each hop must be
+  # https: a redirect can't downgrade to plaintext. Android has no CA store
   # where :public_key looks, so the trust store falls back to the system's
   # /system/etc/security/cacerts (one PEM per authority).
   #
@@ -14,11 +15,15 @@ defmodule MobAppUpdate.HTTP do
   #   :timeout         — ms of silence allowed while waiting for the response
   #                      or between chunks of its body (default 60_000)
   #   :connect_timeout — ms (default 15_000)
+  #   :allow_loopback_http — also accept http:// to 127.0.0.1 / ::1 /
+  #                      localhost (tests, adb reverse); default false. Any
+  #                      other http:// URL or hop is {:insecure_url, url}.
 
   @android_cacerts "/system/etc/security/cacerts"
   @max_redirects 5
   @default_timeout 60_000
   @default_connect_timeout 15_000
+  @loopback_hosts ["127.0.0.1", "::1", "localhost"]
 
   @type opts :: keyword()
 
@@ -152,8 +157,10 @@ defmodule MobAppUpdate.HTTP do
   defp rate_limit_reset(nil), do: nil
 
   defp rate_limit_reset(value) do
-    case Integer.parse(value) do
-      {unix, ""} -> DateTime.from_unix!(unix)
+    with {unix, ""} <- Integer.parse(value),
+         {:ok, time} <- DateTime.from_unix(unix) do
+      time
+    else
       _ -> nil
     end
   end
@@ -173,26 +180,32 @@ defmodule MobAppUpdate.HTTP do
 
   # The request has no overall deadline (a 100 MB download takes as long as
   # it takes); receive_stream/5 enforces :timeout between messages.
-  defp http_opts(url, opts) do
+  defp http_opts(url, opts) when is_binary(url) do
     base = [
       autoredirect: false,
       timeout: :infinity,
       connect_timeout: Keyword.get(opts, :connect_timeout, @default_connect_timeout)
     ]
 
-    case URI.parse(url).scheme do
+    uri = URI.parse(url)
+
+    case uri.scheme do
       "https" ->
         with {:ok, ssl} <- ssl_opts(opts), do: {:ok, [{:ssl, ssl} | base]}
 
       # httpc's default for an absent :ssl option calls
       # :public_key.cacerts_get/0, which raises on Android even for http://.
       "http" ->
-        {:ok, [{:ssl, []} | base]}
+        if Keyword.get(opts, :allow_loopback_http) == true and uri.host in @loopback_hosts,
+          do: {:ok, [{:ssl, []} | base]},
+          else: {:error, {:insecure_url, url}}
 
       _ ->
         {:error, {:bad_url, url}}
     end
   end
+
+  defp http_opts(url, _opts), do: {:error, {:bad_url, url}}
 
   defp ssl_opts(opts) do
     case Keyword.get_lazy(opts, :cacerts, &default_cacerts/0) do

@@ -29,27 +29,34 @@ for the manifest schema. This file is mob_app_update-specific.
 
 * `lib/mob_app_update.ex` — public API; orchestrates the rest.
 * `lib/mob_app_update/release.ex` — pure: GitHub release JSON + `update.json`
-  → release map; selection (`pick/2`), validation (`build/2`), `compare/2`.
+  → release map; shape check (`well_formed?/1`), selection (`pick/2`),
+  validation + size cap (`build/3`, `max_size/1`), `compare/2`.
 * `lib/mob_app_update/github.ex` — the two GitHub reads (API + metadata asset).
 * `lib/mob_app_update/http.ex` — `:httpc` + `:ssl`: small GETs, streaming GET
-  with flow control (`{:self, :once}`), manual redirects, CA store (Android
+  with flow control (`{:self, :once}`), manual redirects (https required on
+  every hop; `allow_loopback_http` for loopback only), CA store (Android
   fallback `/system/etc/security/cacerts`).
-* `lib/mob_app_update/download.ex` — streams to `<dir>/<apk>.part`, hashes,
-  checks size + sha256, renames; deletes on any failure.
+* `lib/mob_app_update/download.ex` — cap + free-space check, streams to
+  `<dir>/<apk>.part`, hashes, checks size + sha256, renames; deletes (and
+  logs a failed delete) on any failure.
+* `lib/mob_app_update/install.ex` — `install/2`: stages the APK in the
+  private download dir (copying anything else there), pre-check, space
+  check, permission, bridge.
 * `lib/mob_app_update/precheck.ex` — pure install pre-check (package,
-  versionCode, signer set / v3 rotation).
+  versionCode, signer set / rotation lineage per Android's update rule).
 * `lib/mob_app_update/native.ex` — the NIF seam; JSON decode; `:unsupported`
-  off Android.
+  off Android and below API 28.
 * `lib/mob_app_update/self_test.ex` — `Mob.Plugin.SelfTest` (installed/0 round trip).
 * `lib/mix/tasks/mob_app_update.publish.ex` — host-side publish task (aapt2,
-  apksigner, `gh release create`).
+  apksigner, `gh release create`; tags validated, `gh` argv `--name=value …
+  -- <tag> <files>`).
 * `src/mob_app_update_nif.erl` — Erlang NIF stub (tolerant `on_load`).
 * `priv/mob_plugin.exs` — manifest: Android zig NIF, Kotlin bridge,
-  `REQUEST_INSTALL_PACKAGES`.
+  `REQUEST_INSTALL_PACKAGES`, `min_sdk: 28`.
 * `priv/native/jni/mob_app_update_nif.zig` — NIFs (all dirty IO) +
   `nativeRegister` / `nativeDeliverInstall` thunks.
 * `priv/native/android/MobAppUpdateBridge.kt` — `MobActivityAware` bridge:
-  PackageManager info / archive info, unknown-sources settings,
+  PackageManager info / archive info, free space, unknown-sources settings,
   PackageInstaller session + status receiver.
 
 ## Load-bearing invariants
@@ -79,6 +86,12 @@ for the manifest schema. This file is mob_app_update-specific.
    process). Don't build flows that wait for `:success`.
 8. **32-bit Android is a target**: pids travel as `jlong` via
    `pidToJlong` / `pidFromLong`.
+9. **What is checked is what is installed.** `install/2` only hands the
+   bridge a file directly in the private download dir (never a symlink);
+   anything else is copied there first. Don't pass caller paths straight
+   to `inspect` / `install`.
+10. **The release doesn't size its own download.** `max_size` (app-side)
+    bounds the metadata's size, which bounds the stream; keep both checks.
 
 ## Testing
 
@@ -86,11 +99,13 @@ for the manifest schema. This file is mob_app_update-specific.
 mix format && mix credo --strict && mix compile --warnings-as-errors && mix test
 ```
 
-Host tests: `Release` (selection, validation, compare), `check/1` and
+Host tests: `Release` (selection, validation, cap, compare), `check/1` and
 `download/2` against `test/support/test_server.ex` (a tiny `:gen_tcp` HTTP
-server: redirects, rate limit, progress, mismatches), `Precheck`, the publish
-task with stub tools (`MOB_APP_UPDATE_AAPT2` / `MOB_APP_UPDATE_APKSIGNER`),
-and the manifest through mob_dev's validator.
+server: redirects, rate limit, progress, mismatches, https policy, malformed
+JSON), `Precheck` (incl. rotation / rollback), `Install.stage/3`, the
+publish task with stub tools (`MOB_APP_UPDATE_AAPT2` /
+`MOB_APP_UPDATE_APKSIGNER`), and the manifest through mob_dev's validator.
+The test server is plain http on 127.0.0.1: pass `allow_loopback_http: true`.
 
 Native code isn't exercised by `mix test`. Device recipe (Android emulator;
 lease it first, see `~/AGENTS.md`):

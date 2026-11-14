@@ -80,10 +80,27 @@ defmodule MobAppUpdate.Native do
     end
   end
 
+  # Bytes available to this app on the file system holding `dir`
+  # (File.getUsableSpace).
+  @spec free_space(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def free_space(dir) do
+    with :ok <- require_android(),
+         {:ok, json} <- :mob_app_update_nif.app_update_free_space(dir),
+         {:ok, map} <- decode(json) do
+      case map do
+        %{"free_bytes" => free} when is_integer(free) and free >= 0 -> {:ok, free}
+        _ -> {:error, {:bad_bridge_reply, json}}
+      end
+    end
+  end
+
   defp require_android, do: if(android?(), do: :ok, else: {:error, :unsupported})
 
+  # The bridge answers {"error": "unsupported_sdk"} below API 28 (the
+  # manifest's min_sdk), where the SigningInfo APIs it uses don't exist.
   defp decode(json) do
     case JSON.decode(json) do
+      {:ok, %{"error" => "unsupported_sdk"}} -> {:error, :unsupported}
       {:ok, map} when is_map(map) -> {:ok, map}
       _ -> {:error, {:bad_bridge_reply, json}}
     end

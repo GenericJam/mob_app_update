@@ -64,7 +64,7 @@ defmodule MobAppUpdate.ReleaseTest do
     end
   end
 
-  describe "build/2" do
+  describe "build/3" do
     test "builds the release map from the release and its metadata" do
       assert {:ok, release} =
                Release.build(gh_release("v1.7.0"), metadata(%{"sha256" => String.upcase(@sha)}))
@@ -101,6 +101,20 @@ defmodule MobAppUpdate.ReleaseTest do
 
       assert Release.build(gh_release("v1"), metadata(%{"size" => 999})) ==
                {:error, {:metadata_mismatch, {:size, 999, 1000}}}
+    end
+
+    test "an APK over the size cap is refused even when GitHub agrees with the metadata" do
+      big = 300 * 1024 * 1024 + 1
+      [meta_asset, apk_asset] = gh_release("v1")["assets"]
+      release = Map.put(gh_release("v1"), "assets", [meta_asset, %{apk_asset | "size" => big}])
+
+      assert Release.build(release, metadata(%{"size" => big})) ==
+               {:error, {:apk_too_large, big, 300 * 1024 * 1024}}
+
+      assert Release.build(gh_release("v1"), metadata(), max_size: 999) ==
+               {:error, {:apk_too_large, 1000, 999}}
+
+      assert {:ok, _} = Release.build(gh_release("v1"), metadata(), max_size: 1000)
     end
 
     test "rejects malformed metadata field by field" do

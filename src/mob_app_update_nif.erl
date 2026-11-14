@@ -15,7 +15,8 @@
     app_update_can_request_installs/0,
     app_update_open_install_settings/0,
     app_update_inspect/1,
-    app_update_install/2
+    app_update_install/2,
+    app_update_free_space/1
 ]).
 -on_load(init/0).
 
@@ -44,4 +45,9 @@ app_update_inspect(_Path) ->
 %% ok | {error, Reason} — starts a PackageInstaller session for Path; the
 %% outcome is sent to Pid as {mob_app_update, {install, Status}}.
 app_update_install(_Path, _Pid) ->
+    erlang:nif_error(nif_not_loaded).
+
+%% {ok, Json} | {error, Reason} — {"free_bytes": N}, the usable space of the
+%% file system holding Path.
+app_update_free_space(_Path) ->
     erlang:nif_error(nif_not_loaded).

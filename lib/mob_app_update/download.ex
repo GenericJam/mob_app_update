@@ -2,18 +2,32 @@ defmodule MobAppUpdate.Download do
   @moduledoc false
   # Streams a release's APK to `<dir>/<apk name>.part`, hashing as it goes,
   # then checks size + sha256 and renames it to `<dir>/<apk name>`. Any failure
-  # deletes the partial file. Runs in the caller's process.
+  # deletes the partial file (a failed delete is logged). Runs in the caller's
+  # process.
+  #
+  # The release's size is capped (Release.max_size/1) before anything is
+  # requested, and the stream is cut off as soon as it passes that size, so a
+  # release can't make the app write more than the cap. The directory must
+  # have room for the APK plus @reserve first.
 
-  alias MobAppUpdate.{HTTP, Native}
+  require Logger
+
+  alias MobAppUpdate.{HTTP, Native, Release}
 
   # Progress is reported at most once per this many bytes (plus the start
   # and the end), so a 100 MB APK sends a few hundred messages, not thousands.
   @progress_step 256 * 1024
 
+  # Left free for the system after an APK is written: Android starts failing
+  # installs and other apps' writes when storage runs out.
+  @reserve 64 * 1024 * 1024
+
   @spec run(MobAppUpdate.Release.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
   def run(%{apk: %{name: name, url: url, size: size, sha256: sha256}}, opts) do
-    with {:ok, dir} <- dir(opts),
-         :ok <- File.mkdir_p(dir) do
+    with :ok <- Release.check_cap(size, Release.max_size(opts)),
+         {:ok, dir} <- dir(opts),
+         :ok <- mkdir(dir),
+         :ok <- require_space(dir, size) do
       dest = Path.join(dir, Path.basename(name))
       part = dest <> ".part"
       report = reporter(opts, size)
@@ -25,6 +39,46 @@ defmodule MobAppUpdate.Download do
         end
 
       finish(result, part, dest, size, sha256)
+    end
+  end
+
+  @doc false
+  # :ok when `dir`'s file system has room for `bytes` plus the reserve,
+  # else {:error, {:insufficient_space, needed, free}}. Off Android (no
+  # bridge to ask) the check is skipped.
+  @spec require_space(Path.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def require_space(dir, bytes) do
+    case Native.free_space(dir) do
+      {:ok, free} -> space(free, bytes)
+      {:error, :unsupported} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc false
+  @spec space(non_neg_integer(), non_neg_integer()) :: :ok | {:error, term()}
+  def space(free, bytes) do
+    needed = bytes + @reserve
+    if free >= needed, do: :ok, else: {:error, {:insufficient_space, needed, free}}
+  end
+
+  @doc false
+  # Deletes `path`, logging a failure other than "already gone".
+  @spec remove(Path.t()) :: :ok
+  def remove(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> Logger.warning("mob_app_update: could not delete #{path}: #{reason}")
+    end
+
+    :ok
+  end
+
+  defp mkdir(dir) do
+    case File.mkdir_p(dir) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:file, reason}}
     end
   end
 
@@ -44,7 +98,7 @@ defmodule MobAppUpdate.Download do
     end
   end
 
-  # Don't let a wrong or hostile server fill the disk.
+  # Don't let a wrong or hostile server fill the disk: size is at most the cap.
   defp write_chunk(state, chunk, _report) when state.bytes + byte_size(chunk) > state.size,
     do: {:error, {:size_mismatch, state.size, state.bytes + byte_size(chunk)}}
 
@@ -83,7 +137,7 @@ defmodule MobAppUpdate.Download do
   end
 
   defp finish({:error, _} = error, part, _dest, _size, _sha256) do
-    File.rm(part)
+    remove(part)
     error
   end
 

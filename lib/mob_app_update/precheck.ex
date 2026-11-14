@@ -6,14 +6,29 @@ defmodule MobAppUpdate.Precheck do
   (`getPackageArchiveInfo` with `GET_SIGNING_CERTIFICATES`).
 
   Android enforces the same rules when it installs; checking first turns a
-  generic install failure into a clear error and avoids showing the user a
-  confirmation for an install that can't succeed.
+  generic install failure into a clear error and, for the common cases, avoids
+  showing the user a confirmation for an install that can't succeed.
 
-  Signers are SHA-256 digests (lowercase hex) of the signing certificates.
-  The APK passes when it is for the same package, has a higher `versionCode`,
-  and is signed by the same certificate set as the installed app, or (key
-  rotation, APK Signature Scheme v3) when the installed app's single signer
-  appears in the APK's proven signing-certificate history.
+  Signers are SHA-256 digests (lowercase hex) of the signing certificates;
+  `signer_history` is `SigningInfo.getSigningCertificateHistory()` (oldest
+  first, the current signer last; empty with multiple signers). The APK
+  passes when it is for the same package, has a higher `versionCode`, and its
+  signers are compatible the way Android's update check
+  (`PackageManagerServiceUtils.verifySignatures`) defines it:
+
+    * either side signed by several certificates: the two sets are equal
+      (rotation isn't supported with multiple signers);
+    * one signer each: the same certificate; or the installed signer is in
+      the APK's rotation lineage (a rotated key, `INSTALLED_DATA` capability
+      at install time); or the APK's signer is in the installed app's
+      lineage (`ROLLBACK` capability).
+
+  The public SDK reports a lineage's certificates but not their capability
+  flags (`Signature.getFlags` is hidden), so a lineage relation passes here
+  and Android makes the capability decision at install time; if a lineage
+  revoked that capability, the install ends in `{:failure, status, message}`
+  rather than in a pre-check error. Certificates with no relation at all are
+  refused here, since Android certainly refuses them.
   """
 
   @type info :: MobAppUpdate.Native.package_info()
@@ -32,7 +47,7 @@ defmodule MobAppUpdate.Precheck do
       not is_integer(apk.version_code) or apk.version_code <= installed.version_code ->
         {:error, {:not_an_update, installed.version_code, apk.version_code}}
 
-      not same_signer?(installed, apk) ->
+      not compatible_signers?(installed, apk) ->
         {:error, {:signature_mismatch, installed.signers, apk.signers}}
 
       true ->
@@ -40,15 +55,20 @@ defmodule MobAppUpdate.Precheck do
     end
   end
 
-  defp same_signer?(%{signers: []}, _apk), do: false
-  defp same_signer?(_installed, %{signers: []}), do: false
+  defp compatible_signers?(%{signers: []}, _apk), do: false
+  defp compatible_signers?(_installed, %{signers: []}), do: false
 
-  defp same_signer?(installed, apk) do
-    MapSet.new(installed.signers) == MapSet.new(apk.signers) or rotated?(installed, apk)
+  # Rotation only exists for a single signer on both sides.
+  defp compatible_signers?(
+         %{signers: [old], multiple_signers: false} = installed,
+         %{
+           signers: [new],
+           multiple_signers: false
+         } = apk
+       ) do
+    old == new or old in apk.signer_history or new in installed.signer_history
   end
 
-  defp rotated?(%{multiple_signers: false, signers: [current]}, %{multiple_signers: false} = apk),
-    do: current in apk.signer_history
-
-  defp rotated?(_installed, _apk), do: false
+  defp compatible_signers?(installed, apk),
+    do: MapSet.new(installed.signers) == MapSet.new(apk.signers)
 end

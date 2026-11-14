@@ -27,6 +27,10 @@
     # PackageInstaller sessions need it; the user still grants "Install
     # unknown apps" per app (MobAppUpdate.open_install_settings/0) and
     # confirms every install.
-    permissions: ["android.permission.REQUEST_INSTALL_PACKAGES"]
+    permissions: ["android.permission.REQUEST_INSTALL_PACKAGES"],
+    # SigningInfo / GET_SIGNING_CERTIFICATES / longVersionCode are API 28
+    # (Mob's default minSdk). Below it the bridge answers "unsupported_sdk"
+    # (MobAppUpdate: {:error, :unsupported}) rather than crashing.
+    min_sdk: 28
   }
 }

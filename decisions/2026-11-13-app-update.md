@@ -50,24 +50,48 @@ rate-limits its checks) and downloads assets from GitHub's CDN.
   APK with `apksigner` and prints the signer certificate's SHA-256 so the
   publisher sees which key signed it.
 * **We pre-check what Android would enforce**, so the user gets a clear
-  error instead of a generic install failure, and is never asked to confirm
-  an install that can't succeed: before opening the install session,
-  `install/2` reads the downloaded APK with
+  error instead of a generic install failure: before opening the install
+  session, `install/2` reads the APK with
   `PackageManager.getPackageArchiveInfo(GET_SIGNING_CERTIFICATES)` and
-  requires the installed package name, a higher `versionCode`, and the same
-  signing certificate set (or a v3 rotation lineage containing the installed
-  signer). `check/1` also refuses metadata naming another package.
+  requires the installed package name, a higher `versionCode`, and signers
+  Android's update rule (`verifySignatures`) can accept: the same
+  certificate set; or, single signers only, the installed signer in the
+  APK's rotation lineage (`INSTALLED_DATA`) or the APK's signer in the
+  installed lineage (`ROLLBACK`). The public SDK lists a lineage's
+  certificates but not their capability flags (`Signature.getFlags` is
+  hidden), so for a rotated key the pre-check only rules out certificates
+  with no relation, and Android decides the capability at install time (a
+  refusal is an install `{:failure, ...}`, after the confirmation). Parsing
+  the v3 signing block ourselves to read the flags was rejected: a lot of
+  code for a case (a lineage that revokes a capability) none of our apps
+  has, with Android enforcing it regardless. `check/1` also refuses
+  metadata naming another package.
+* **The pre-check binds to the installed bytes.** Android parses the APK by
+  path and the bridge reopens it later on its worker thread, so the file
+  must be one nobody else can swap in between: an APK directly in the app's
+  private download dir is used in place; any other path (or a symlink) is
+  first copied there under a fresh name, and that copy is checked and
+  installed.
 * **sha256 guards the download's integrity, not its authenticity.** The
   metadata's sha256 and size are checked after streaming the APK to disk
   (the file is deleted on a mismatch), and when GitHub reports the asset's
   `digest` it must equal the metadata's sha256. That catches truncated or
   corrupted downloads and a metadata/asset mix-up; whoever can edit the
   release can edit both, which is why authenticity rests on the signature.
-* **HTTPS to GitHub** with peer verification (`:ssl` `verify_peer` and
-  hostname checks). The BEAM has no CA store on Android, so the plugin reads
-  `/system/etc/security/cacerts`. Redirects (GitHub's asset links redirect to
-  another host) are followed by the plugin, each hop with TLS options for its
-  own host.
+* **Disk use is capped by the app, not by the release.** The same editor
+  controls the metadata's size and the asset, so the app sets `max_size`
+  (default 300 MiB): larger metadata is refused before any download, and
+  the stream is cut off at the metadata size. The download and the
+  installer's session copy each require free space for the APK plus 64 MiB
+  first; Android's own `allocateBytes` in `openWrite` still guards the
+  session.
+* **HTTPS only** with peer verification (`:ssl` `verify_peer` and hostname
+  checks). The BEAM has no CA store on Android, so the plugin reads
+  `/system/etc/security/cacerts`. Redirects (GitHub's asset links redirect
+  to another host) are followed by the plugin, each hop with TLS options for
+  its own host and each hop required to be `https://`; `http://` is
+  accepted only to loopback hosts and only with `allow_loopback_http: true`
+  (tests, `adb reverse`).
 
 ### UX
 

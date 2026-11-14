@@ -8,7 +8,16 @@ defmodule MobAppUpdate.CheckTest do
 
   setup do
     server = TestServer.start()
-    %{server: server, opts: [repo: "o/app", api_base: server.url, installed: @installed]}
+
+    %{
+      server: server,
+      opts: [
+        repo: "o/app",
+        api_base: server.url,
+        installed: @installed,
+        allow_loopback_http: true
+      ]
+    }
   end
 
   # A release whose assets live on the test server; `meta` is served as its
@@ -198,5 +207,101 @@ defmodule MobAppUpdate.CheckTest do
 
   test "off Android, without :installed, check is unsupported", %{opts: opts} do
     assert MobAppUpdate.check(Keyword.delete(opts, :installed)) == {:error, :unsupported}
+  end
+
+  describe "transport security" do
+    test "plain http is refused unless allowed, and then only to loopback", %{
+      server: server,
+      opts: opts
+    } do
+      serve_latest(server, release(server, "v1.6.0", meta(6)))
+      url = "#{server.url}/repos/o/app/releases/latest"
+
+      assert MobAppUpdate.check(Keyword.delete(opts, :allow_loopback_http)) ==
+               {:error, {:insecure_url, url}}
+
+      refute_received {:test_server, _, _}
+
+      assert MobAppUpdate.check(Keyword.put(opts, :api_base, "http://example.com")) ==
+               {:error, {:insecure_url, "http://example.com/repos/o/app/releases/latest"}}
+    end
+
+    test "every redirect hop is held to the policy", %{server: server, opts: opts} do
+      rel = release(server, "v1.6.0", meta(6))
+      TestServer.redirect(server, "/redirect/update.json", "http://example.com/update.json")
+
+      rel =
+        put_in(
+          rel,
+          ["assets", Access.at(0), "browser_download_url"],
+          "#{server.url}/redirect/update.json"
+        )
+
+      serve_latest(server, rel)
+
+      assert MobAppUpdate.check(opts) ==
+               {:error, {:insecure_url, "http://example.com/update.json"}}
+    end
+  end
+
+  describe "malformed responses are errors, not crashes" do
+    test "latest release shapes", %{server: server, opts: opts} do
+      good = release(server, "v1.6.0", meta(6))
+
+      for bad <- [
+            [good],
+            Map.put(good, "assets", %{}),
+            Map.put(good, "assets", ["update.json"]),
+            Map.put(good, "tag_name", 16),
+            Map.put(good, "body", %{"x" => 1}),
+            Map.delete(good, "assets")
+          ] do
+        serve_latest(server, bad)
+        assert MobAppUpdate.check(opts) == {:error, {:bad_response, :latest}}
+      end
+    end
+
+    test "a release list with a malformed entry", %{server: server, opts: opts} do
+      serve_list(server, [release(server, "v1.6.0", meta(6)), %{"assets" => %{}}])
+
+      assert MobAppUpdate.check([prerelease: true] ++ opts) ==
+               {:error, {:bad_response, :releases}}
+
+      serve_list(server, %{"not" => "a list"})
+
+      assert MobAppUpdate.check([prerelease: true] ++ opts) ==
+               {:error, {:bad_response, :releases}}
+    end
+
+    test "a metadata asset without a download URL", %{server: server, opts: opts} do
+      rel = release(server, "v1.6.0", meta(6))
+      serve_latest(server, put_in(rel, ["assets", Access.at(0), "browser_download_url"], nil))
+
+      assert MobAppUpdate.check(opts) == {:error, {:bad_response, :metadata_asset}}
+    end
+
+    test "an out-of-range rate-limit reset is reported as unknown", %{
+      server: server,
+      opts: opts
+    } do
+      TestServer.route(
+        server,
+        "/repos/o/app/releases/latest",
+        {403, [{"x-ratelimit-remaining", "0"}, {"x-ratelimit-reset", "99999999999999999999"}],
+         "{}"}
+      )
+
+      assert MobAppUpdate.check(opts) == {:error, {:rate_limited, nil}}
+    end
+  end
+
+  test "an APK over the size cap is refused, whatever the metadata claims", %{
+    server: server,
+    opts: opts
+  } do
+    serve_latest(server, release(server, "v1.6.0", meta(6)))
+
+    assert MobAppUpdate.check([max_size: 2047] ++ opts) ==
+             {:error, {:apk_too_large, 2048, 2047}}
   end
 end

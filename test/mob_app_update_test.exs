@@ -6,10 +6,11 @@ defmodule MobAppUpdateTest do
   @plugin_dir Path.expand("..", __DIR__)
 
   describe "plugin manifest" do
-    test "passes the pre-publish validator (paths, NIF module, bridge, permission)" do
+    test "passes the pre-publish validator (paths, NIF module, bridge, permission, min_sdk)" do
       {:ok, manifest} = Manifest.load(@plugin_dir)
       assert %{errors: []} = Validator.validate_plugin(manifest, @plugin_dir)
       assert manifest.android.permissions == ["android.permission.REQUEST_INSTALL_PACKAGES"]
+      assert manifest.android.min_sdk == 28
     end
   end
 

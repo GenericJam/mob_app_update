@@ -25,19 +25,18 @@ defmodule MobAppUpdate.GitHub do
 
     if Keyword.get(opts, :prerelease, false) do
       with {:ok, releases} <- api(repo, "/releases?per_page=#{@per_page}", opts) do
-        if is_list(releases),
+        if is_list(releases) and Enum.all?(releases, &Release.well_formed?/1),
           do: {:ok, Release.pick(releases, asset)},
           else: {:error, {:bad_response, :releases}}
       end
     else
       case api(repo, "/releases/latest", opts) do
-        {:ok, %{} = release} ->
-          if Release.asset(release, asset),
-            do: {:ok, release},
-            else: {:error, :no_update_metadata}
-
-        {:ok, _} ->
-          {:error, {:bad_response, :latest}}
+        {:ok, release} ->
+          cond do
+            not Release.well_formed?(release) -> {:error, {:bad_response, :latest}}
+            Release.asset(release, asset) -> {:ok, release}
+            true -> {:error, :no_update_metadata}
+          end
 
         {:error, :not_found} ->
           {:error, :no_release}
@@ -53,11 +52,17 @@ defmodule MobAppUpdate.GitHub do
   def metadata(release, opts) do
     asset = Release.asset(release, Keyword.get(opts, :metadata_asset, "update.json"))
 
-    with {:ok, body} <- HTTP.get(asset["browser_download_url"], [], opts, @max_metadata) do
-      case JSON.decode(body) do
-        {:ok, meta} -> {:ok, meta}
-        {:error, _} -> {:error, {:invalid_metadata, :not_json}}
-      end
+    case asset do
+      %{"browser_download_url" => url} when is_binary(url) ->
+        with {:ok, body} <- HTTP.get(url, [], opts, @max_metadata) do
+          case JSON.decode(body) do
+            {:ok, meta} -> {:ok, meta}
+            {:error, _} -> {:error, {:invalid_metadata, :not_json}}
+          end
+        end
+
+      _ ->
+        {:error, {:bad_response, :metadata_asset}}
     end
   end
 

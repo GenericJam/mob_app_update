@@ -14,7 +14,16 @@ defmodule MobAppUpdate.Release do
   `apk` names an asset of the same release whose size must equal `size`; when
   GitHub reports the asset's `digest` (`"sha256:<hex>"`) it must equal
   `sha256`. The installed app's `versionCode` is compared with `version_code`.
+
+  ## The size cap
+
+  Whoever can edit a release controls both `size` and the asset, so their
+  agreement is no limit. `size` must also be at most `:max_size` (default
+  #{300 * 1024 * 1024} bytes, 300 MiB), which `MobAppUpdate.download/2` enforces
+  again on the streamed bytes.
   """
+
+  @default_max_size 300 * 1024 * 1024
 
   @typedoc "The APK to download."
   @type apk :: %{
@@ -46,9 +55,37 @@ defmodule MobAppUpdate.Release do
         }
 
   @doc """
+  The APK size cap from `opts[:max_size]` (a positive integer of bytes),
+  default 300 MiB.
+  """
+  @spec max_size(keyword()) :: pos_integer()
+  def max_size(opts) do
+    case Keyword.get(opts, :max_size, @default_max_size) do
+      max when is_integer(max) and max > 0 -> max
+      other -> raise ArgumentError, ":max_size must be a positive integer, got: #{inspect(other)}"
+    end
+  end
+
+  @doc """
+  Whether `release` (one entry of the GitHub releases API) has the shape the
+  rest of this module reads: a map with a string `tag_name`, string-or-null
+  `name` / `body` / `html_url`, and a list of asset maps with string names.
+  """
+  @spec well_formed?(term()) :: boolean()
+  def well_formed?(%{"tag_name" => tag, "assets" => assets} = release)
+      when is_binary(tag) and is_list(assets) do
+    Enum.all?(["name", "body", "html_url"], &optional_string?(release[&1])) and
+      Enum.all?(assets, &match?(%{"name" => name} when is_binary(name), &1))
+  end
+
+  def well_formed?(_), do: false
+
+  defp optional_string?(value), do: is_nil(value) or is_binary(value)
+
+  @doc """
   The newest release to consider from a `GET /repos/:repo/releases` page
-  (newest first): the first one that is not a draft and carries the metadata
-  asset `metadata_asset`, or `nil`.
+  (newest first, each `well_formed?/1`): the first one that is not a draft
+  and carries the metadata asset `metadata_asset`, or `nil`.
   """
   @spec pick([map()], String.t()) :: map() | nil
   def pick(releases, metadata_asset) when is_list(releases) do
@@ -57,22 +94,26 @@ defmodule MobAppUpdate.Release do
 
   @doc "The asset of `release` named `name`, or `nil`."
   @spec asset(map(), String.t()) :: map() | nil
-  def asset(release, name) do
-    Enum.find(release["assets"] || [], &(&1["name"] == name))
+  def asset(%{"assets" => assets}, name) when is_list(assets) do
+    Enum.find(assets, &match?(%{"name" => ^name}, &1))
   end
+
+  def asset(_release, _name), do: nil
 
   @doc """
   Validates `metadata` (the decoded metadata asset) against `release`'s assets
-  and builds the release map.
+  and builds the release map. `opts`: `:max_size` (see the moduledoc).
 
   Errors: `{:invalid_metadata, field}` for a missing or malformed field,
+  `{:apk_too_large, size, max_size}`,
   `{:metadata_mismatch, {:missing_asset, name}}`,
   `{:metadata_mismatch, {:size, metadata_size, asset_size}}`,
   `{:metadata_mismatch, {:sha256, metadata_sha256, github_digest}}`.
   """
-  @spec build(map(), term()) :: {:ok, t()} | {:error, term()}
-  def build(release, metadata) do
+  @spec build(map(), term(), keyword()) :: {:ok, t()} | {:error, term()}
+  def build(release, metadata, opts \\ []) do
     with {:ok, meta} <- parse_metadata(metadata),
+         :ok <- check_cap(meta.size, max_size(opts)),
          {:ok, apk_asset} <- apk_asset(release, meta.apk),
          :ok <- check_size(meta, apk_asset),
          :ok <- check_digest(meta, apk_asset) do
@@ -96,6 +137,12 @@ defmodule MobAppUpdate.Release do
        }}
     end
   end
+
+  @doc false
+  # `{:error, {:apk_too_large, size, max}}` when `size` is over the cap.
+  @spec check_cap(pos_integer(), pos_integer()) :: :ok | {:error, term()}
+  def check_cap(size, max) when size > max, do: {:error, {:apk_too_large, size, max}}
+  def check_cap(_size, _max), do: :ok
 
   @doc """
   Compares `release` with the installed app: `{:ok, :available, release}` when

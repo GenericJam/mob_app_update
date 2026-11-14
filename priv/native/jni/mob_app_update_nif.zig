@@ -9,6 +9,7 @@
 //!   app_update_open_install_settings/0 :ok | {:error, :not_ready | :failed}
 //!   app_update_inspect/1 (path)        {:ok, json} | {:error, :not_ready | :failed}
 //!   app_update_install/2 (path, pid)   :ok | {:error, :not_ready | :failed}
+//!   app_update_free_space/1 (path)     {:ok, json} | {:error, :not_ready | :failed}
 //!
 //! install's outcome reaches `pid` later from Kotlin (nativeDeliverInstall):
 //!   {:mob_app_update, {:install, :pending_user_action | :success | {:failure, status, message}}}
@@ -39,6 +40,7 @@ const Methods = struct {
     open_settings: jni.JMethodID = null,
     inspect: jni.JMethodID = null,
     install: jni.JMethodID = null,
+    free_space: jni.JMethodID = null,
 };
 var g_m: Methods = .{};
 var g_cls: jni.JClass = null;
@@ -58,6 +60,7 @@ export fn Java_io_mob_appupdate_MobAppUpdateBridge_nativeRegister(jenv: *jni.JNI
     g_m.open_settings = methodId(jenv, cls, "openInstallSettings", "()I");
     g_m.inspect = methodId(jenv, cls, "inspect", "([B)[B");
     g_m.install = methodId(jenv, cls, "install", "(J[B)I");
+    g_m.free_space = methodId(jenv, cls, "freeSpace", "([B)[B");
 }
 
 inline fn detachIfAttached(attached: c_int) void {
@@ -171,18 +174,28 @@ fn nif_open_install_settings(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const 
     return codeResult(env, code);
 }
 
-fn nif_inspect(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
-    _ = argc;
+// A bridge method taking a UTF-8 path byte[] and answering a JSON byte[].
+fn pathCall(env: ?*erts.ErlNifEnv, argv: [*]const erts.ERL_NIF_TERM, mid: jni.JMethodID) erts.ERL_NIF_TERM {
     var path: erts.ErlNifBinary = undefined;
     if (erts.enif_inspect_binary(env, argv[0], &path) == 0) return erts.badarg(env);
-    if (g_cls == null or g_m.inspect == null) return errorAtom(env, "not_ready");
+    if (g_cls == null or mid == null) return errorAtom(env, "not_ready");
     var attached: c_int = 0;
     const jenv = get_jenv(&attached) orelse return errorAtom(env, "failed");
     defer detachIfAttached(attached);
     const jpath = binaryBytes(jenv, path) orelse return errorAtom(env, "failed");
     defer jni.deleteLocalRef(jenv, jpath);
-    const result = jenv.*.CallStaticObjectMethod.?(jenv, g_cls, g_m.inspect, jpath);
+    const result = jenv.*.CallStaticObjectMethod.?(jenv, g_cls, mid, jpath);
     return bytesResult(env, jenv, result);
+}
+
+fn nif_inspect(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
+    _ = argc;
+    return pathCall(env, argv, g_m.inspect);
+}
+
+fn nif_free_space(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
+    _ = argc;
+    return pathCall(env, argv, g_m.free_space);
 }
 
 fn nif_install(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
@@ -235,6 +248,7 @@ const nif_funcs = [_]erts.ErlNifFunc{
     .{ .name = "app_update_open_install_settings", .arity = 0, .fptr = nif_open_install_settings, .flags = dirty_io },
     .{ .name = "app_update_inspect", .arity = 1, .fptr = nif_inspect, .flags = dirty_io },
     .{ .name = "app_update_install", .arity = 2, .fptr = nif_install, .flags = dirty_io },
+    .{ .name = "app_update_free_space", .arity = 1, .fptr = nif_free_space, .flags = dirty_io },
 };
 
 var nif_entry: erts.ErlNifEntry = .{
