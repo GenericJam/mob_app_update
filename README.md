@@ -5,8 +5,10 @@ GitHub Releases. The app checks a repository's releases for a newer APK of
 itself, downloads it with progress, verifies its sha256, and the user taps
 Install in the system dialog. Nothing installs silently.
 
-Android only. iOS apps update through TestFlight / the App Store; there every
-call answers `{:error, :unsupported}`. The design and trust model are in
+Android only, `minSdk` 28 or higher (Mob's default; the signer check uses
+`GET_SIGNING_CERTIFICATES`). iOS apps update through TestFlight / the App
+Store; there every call answers `{:error, :unsupported}`. The design and
+trust model are in
 [`decisions/2026-11-13-app-update.md`](decisions/2026-11-13-app-update.md).
 
 ## Install
