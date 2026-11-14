@@ -70,7 +70,10 @@ for the manifest schema. This file is mob_app_update-specific.
    bridge's single worker thread.
 6. **The status PendingIntent is explicit and mutable** (`setPackage`,
    `FLAG_MUTABLE`; API 34 forbids mutable implicit ones) and its receiver is
-   registered `RECEIVER_NOT_EXPORTED` on 33+.
+   registered `RECEIVER_NOT_EXPORTED` on 33+. Below 33 a runtime receiver is
+   exported, so it ignores any broadcast without the per-process `EXTRA_TOKEN`
+   the PendingIntent carries: otherwise another app could hand us an
+   `EXTRA_INTENT` to start. Keep that check first in `onReceive`.
 7. **An update that installs kills the app**, so `:success` usually never
    arrives and the APK is cleaned on the next start (`setActivity`, once per
    process). Don't build flows that wait for `:success`.

@@ -32,6 +32,7 @@ import android.provider.Settings
 import java.io.File
 import java.lang.ref.WeakReference
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import org.json.JSONArray
@@ -67,6 +68,14 @@ object MobAppUpdateBridge : io.mob.plugin.MobActivityAware {
     private class Pending(val pid: Long, val apk: File)
 
     private val sessions = ConcurrentHashMap<Int, Pending>()
+
+    // Below API 33 a runtime-registered receiver is exported, so any app could
+    // send it a fake PENDING_USER_ACTION carrying its own EXTRA_INTENT for us
+    // to start. Only our PendingIntent (held by the system installer) carries
+    // this per-process secret; a broadcast without it is ignored.
+    private const val EXTRA_TOKEN = "io.mob.appupdate.TOKEN"
+    private val token: String = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        .joinToString("") { "%02x".format(it) }
 
     @JvmStatic
     fun register() {
@@ -167,7 +176,7 @@ object MobAppUpdateBridge : io.mob.plugin.MobActivityAware {
                 sessions[sessionId] = Pending(pid, apk)
                 // Explicit (setPackage) so FLAG_MUTABLE is allowed on API 34+;
                 // mutable so the installer can add its status extras.
-                val status = Intent(statusAction(ctx)).setPackage(ctx.packageName)
+                val status = Intent(statusAction(ctx)).setPackage(ctx.packageName).putExtra(EXTRA_TOKEN, token)
                 val flags = PendingIntent.FLAG_UPDATE_CURRENT or
                     (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
                 val sender = PendingIntent.getBroadcast(ctx, sessionId, status, flags).intentSender
@@ -189,6 +198,7 @@ object MobAppUpdateBridge : io.mob.plugin.MobActivityAware {
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.getStringExtra(EXTRA_TOKEN) != token) return
             val id = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
             val pending = sessions[id] ?: return
             val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)

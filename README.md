@@ -70,8 +70,8 @@ def handle_info({:mob_app_update, {:install, status}}, socket), do: ...
 | `check(opts)` | `{:ok, :available, release}`, `{:ok, :up_to_date, %{installed, latest}}`, `{:error, reason}` |
 | `download(release, opts)` | `{:ok, path}`, `{:error, {:sha256_mismatch, expected, got}}`, `{:error, {:size_mismatch, expected, got}}`, ... |
 | `can_request_installs?/0` | `boolean` (`PackageManager.canRequestPackageInstalls`) |
-| `open_install_settings/0` | `:ok` (opens `ACTION_MANAGE_UNKNOWN_APP_SOURCES` for this app) |
-| `install(path, opts)` | `:ok` (session started) or `{:error, :install_permission_required \| :invalid_apk \| {:not_an_update, installed, apk} \| {:package_mismatch, installed, apk} \| {:signature_mismatch, installed_signers, apk_signers}}` |
+| `open_install_settings/0` | `:ok` (opens `ACTION_MANAGE_UNKNOWN_APP_SOURCES` for this app) or `{:error, :not_ready \| :failed \| :unsupported}` |
+| `install(path, opts)` | `:ok` (session started) or `{:error, :install_permission_required \| :invalid_apk \| {:not_an_update, installed_version_code, apk_version_code} \| {:package_mismatch, installed_package, apk_package} \| {:signature_mismatch, installed_signers, apk_signers}}` |
 
 A `release`:
 

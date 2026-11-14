@@ -141,6 +141,17 @@ defmodule MobAppUpdate.CheckTest do
              {:error, {:package_mismatch, "com.example.app", "com.evil"}}
   end
 
+  test "an oversized metadata asset is refused without reading it all", %{
+    server: server,
+    opts: opts
+  } do
+    serve_latest(server, release(server, "v1.6.0", meta(6)))
+    TestServer.route(server, "/dl/v1.6.0/update.json", {200, [], :binary.copy("x", 4_000_000)})
+
+    assert {:error, {:too_large, read}} = MobAppUpdate.check(opts)
+    assert read > 64 * 1024 and read < 4_000_000
+  end
+
   test "metadata that isn't JSON is reported", %{server: server, opts: opts} do
     serve_latest(server, release(server, "v1.6.0", meta(6)))
     TestServer.route(server, "/dl/v1.6.0/update.json", {200, [], "<html>"})

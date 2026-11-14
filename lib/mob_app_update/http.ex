@@ -11,8 +11,8 @@ defmodule MobAppUpdate.HTTP do
   #                      default: OS store, else Android's system store
   #   :ssl             — extra :ssl client options, appended
   #   :user_agent      — default "mob_app_update"
-  #   :timeout         — ms; a whole small request, or the silence allowed
-  #                      between chunks of a download (default 60_000)
+  #   :timeout         — ms of silence allowed while waiting for the response
+  #                      or between chunks of its body (default 60_000)
   #   :connect_timeout — ms (default 15_000)
 
   @android_cacerts "/system/etc/security/cacerts"
@@ -23,37 +23,17 @@ defmodule MobAppUpdate.HTTP do
   @type opts :: keyword()
 
   @doc false
-  # GET into memory; refuses bodies over `max_bytes`.
+  # GET into memory; refuses (and stops reading) a body over `max_bytes`.
   @spec get(String.t(), [{String.t(), String.t()}], opts(), pos_integer()) ::
           {:ok, binary()} | {:error, term()}
   def get(url, headers, opts, max_bytes) do
-    with :ok <- start() do
-      get(url, headers, opts, max_bytes, @max_redirects)
+    collect = fn {:data, chunk}, {size, acc} ->
+      size = size + byte_size(chunk)
+      if size > max_bytes, do: {:error, {:too_large, size}}, else: {:ok, {size, [acc | chunk]}}
     end
-  end
 
-  defp get(_url, _headers, _opts, _max, -1), do: {:error, :too_many_redirects}
-
-  defp get(url, headers, opts, max_bytes, redirects) do
-    with {:ok, http_opts} <- http_opts(url, opts, Keyword.get(opts, :timeout, @default_timeout)) do
-      request = {to_charlist(url), request_headers(headers, opts)}
-
-      case :httpc.request(:get, request, http_opts, body_format: :binary) do
-        {:ok, {{_, 200, _}, _headers, body}} when byte_size(body) <= max_bytes ->
-          {:ok, body}
-
-        {:ok, {{_, 200, _}, _headers, body}} ->
-          {:error, {:too_large, byte_size(body)}}
-
-        {:ok, {{_, status, _}, resp_headers, _body}} ->
-          case redirect(url, status, resp_headers) do
-            {:ok, next} -> get(next, headers, opts, max_bytes, redirects - 1)
-            :none -> {:error, status_error(status, resp_headers)}
-          end
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+    with {:ok, {_size, body}} <- request(url, headers, opts, {0, []}, collect) do
+      {:ok, IO.iodata_to_binary(body)}
     end
   end
 
@@ -65,30 +45,32 @@ defmodule MobAppUpdate.HTTP do
                                              {:ok, state} | {:error, term()})) ::
           {:ok, state} | {:error, term()}
         when state: term()
-  def stream(url, opts, state, handler) do
+  def stream(url, opts, state, handler), do: request(url, [], opts, state, handler)
+
+  defp request(url, headers, opts, state, handler) do
     with :ok <- start() do
-      stream(url, opts, state, handler, @max_redirects)
+      request(url, headers, opts, state, handler, @max_redirects)
     end
   end
 
-  defp stream(_url, _opts, _state, _handler, -1), do: {:error, :too_many_redirects}
+  defp request(_url, _headers, _opts, _state, _handler, -1), do: {:error, :too_many_redirects}
 
-  defp stream(url, opts, state, handler, redirects) do
-    with {:ok, http_opts} <- http_opts(url, opts, :infinity),
+  defp request(url, headers, opts, state, handler, redirects) do
+    with {:ok, http_opts} <- http_opts(url, opts),
          {:ok, ref} <-
            :httpc.request(
              :get,
-             {to_charlist(url), request_headers([], opts)},
+             {to_charlist(url), request_headers(headers, opts)},
              http_opts,
              sync: false,
              stream: {:self, :once},
              body_format: :binary
            ) do
       case receive_stream(ref, nil, state, handler, Keyword.get(opts, :timeout, @default_timeout)) do
-        {:response, status, headers} ->
-          case redirect(url, status, headers) do
-            {:ok, next} -> stream(next, opts, state, handler, redirects - 1)
-            :none -> {:error, status_error(status, headers)}
+        {:response, status, resp_headers} ->
+          case redirect(url, status, resp_headers) do
+            {:ok, next} -> request(next, headers, opts, state, handler, redirects - 1)
+            :none -> {:error, status_error(status, resp_headers)}
           end
 
         other ->
@@ -110,7 +92,7 @@ defmodule MobAppUpdate.HTTP do
             receive_stream(ref, pid, state, handler, timeout)
 
           {:error, _} = error ->
-            :httpc.cancel_request(ref)
+            cancel(ref)
             error
         end
 
@@ -124,8 +106,25 @@ defmodule MobAppUpdate.HTTP do
         {:error, reason}
     after
       timeout ->
-        :httpc.cancel_request(ref)
+        cancel(ref)
         {:error, :timeout}
+    end
+  end
+
+  # Downloads run in the caller's process: leave nothing of a cancelled
+  # request in its mailbox.
+  defp cancel(ref) do
+    :httpc.cancel_request(ref)
+    flush(ref)
+  end
+
+  defp flush(ref) do
+    receive do
+      {:http, {^ref, _}} -> flush(ref)
+      {:http, {^ref, _, _}} -> flush(ref)
+      {:http, {^ref, _, _, _}} -> flush(ref)
+    after
+      0 -> :ok
     end
   end
 
@@ -172,10 +171,12 @@ defmodule MobAppUpdate.HTTP do
         do: {to_charlist(key), to_charlist(value)}
   end
 
-  defp http_opts(url, opts, timeout) do
+  # The request has no overall deadline (a 100 MB download takes as long as
+  # it takes); receive_stream/5 enforces :timeout between messages.
+  defp http_opts(url, opts) do
     base = [
       autoredirect: false,
-      timeout: timeout,
+      timeout: :infinity,
       connect_timeout: Keyword.get(opts, :connect_timeout, @default_connect_timeout)
     ]
 
